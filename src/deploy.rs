@@ -264,9 +264,9 @@ pub enum ConfirmProfileError {
     #[error("Failed to run confirmation command over SSH (the server should roll back): {0}")]
     SSHConfirm(std::io::Error),
     #[error(
-        "Confirming activation over SSH resulted in a bad exit code (the server should roll back): {0:?}"
+        "Confirming activation over SSH resulted in a bad exit code (the server should roll back): {0:?}. The failed command is provided below:\n{1}"
     )]
-    SSHConfirmExit(Option<i32>),
+    SSHConfirmExit(Option<i32>, String),
 }
 
 pub async fn confirm_profile(
@@ -315,7 +315,7 @@ pub async fn confirm_profile(
 
     match ssh_confirm_exit_status.code() {
         Some(0) => (),
-        a => return Err(ConfirmProfileError::SSHConfirmExit(a)),
+        a => return Err(ConfirmProfileError::SSHConfirmExit(a, format!("{:?}", ssh_confirm_command))),
     };
 
     info!("Deployment confirmed.");
@@ -330,15 +330,15 @@ pub enum DeployProfileError {
 
     #[error("Failed to run activation command over SSH: {0}")]
     SSHActivate(std::io::Error),
-    #[error("Activating over SSH resulted in a bad exit code: {0:?}")]
-    SSHActivateExit(Option<i32>),
+    #[error("Activating over SSH resulted in a bad exit code: {0:?}. The failed command is provided below:\n{1}")]
+    SSHActivateExit(Option<i32>, String),
     #[error("Activating over SSH resulted in a bad exit code: {0:?}")]
     SSHActivateTimeout(tokio::sync::oneshot::error::RecvError),
 
     #[error("Failed to run wait command over SSH: {0}")]
     SSHWait(std::io::Error),
-    #[error("Waiting over SSH resulted in a bad exit code: {0:?}")]
-    SSHWaitExit(Option<i32>),
+    #[error("Waiting over SSH resulted in a bad exit code: {0:?}. The failed command is provided below:\n{1}")]
+    SSHWaitExit(Option<i32>, String),
 
     #[error("Failed to pipe to child stdin: {0}")]
     SSHActivatePipe(std::io::Error),
@@ -427,7 +427,7 @@ pub async fn deploy_profile(
 
         match ssh_activate_exit_status.code() {
             Some(0) => (),
-            a => return Err(DeployProfileError::SSHActivateExit(a)),
+            a => return Err(DeployProfileError::SSHActivateExit(a, format!("{:?}", ssh_activate_command))),
         };
 
         if dry_activate {
@@ -482,7 +482,7 @@ pub async fn deploy_profile(
                 Err(x) => Some(DeployProfileError::SSHActivate(x)),
                 Ok(ref x) => match x.status.code() {
                     Some(0) => None,
-                    a => Some(DeployProfileError::SSHActivateExit(a)),
+                    a => Some(DeployProfileError::SSHActivateExit(a, format!("{:?}", ssh_activate_command))),
                 },
             };
 
@@ -510,7 +510,7 @@ pub async fn deploy_profile(
                 debug!("Wait command ended");
                 match x.map_err(DeployProfileError::SSHWait)?.code() {
                     Some(0) => (),
-                    a => return Err(DeployProfileError::SSHWaitExit(a)),
+                    a => return Err(DeployProfileError::SSHWaitExit(a, format!("{:?}", ssh_wait_command))),
                 };
             },
             x = recv_activate => {
@@ -540,8 +540,8 @@ pub enum RevokeProfileError {
 
     #[error("Error revoking deployment: {0}")]
     SSHRevoke(std::io::Error),
-    #[error("Revoking over SSH resulted in a bad exit code: {0:?}")]
-    SSHRevokeExit(Option<i32>),
+    #[error("Revoking over SSH resulted in a bad exit code: {0:?}. The failed command is provided below:\n{1}")]
+    SSHRevokeExit(Option<i32>, String),
 
     #[error("Deployment data invalid: {0}")]
     InvalidDeployDataDefs(#[from] DeployDataDefsError),
@@ -594,7 +594,7 @@ pub async fn revoke(
         Err(x) => Err(RevokeProfileError::SSHRevoke(x)),
         Ok(ref x) => match x.status.code() {
             Some(0) => Ok(()),
-            a => Err(RevokeProfileError::SSHRevokeExit(a)),
+            a => Err(RevokeProfileError::SSHRevokeExit(a,format!("{:?}", ssh_activate_command))),
         },
     }
 }
