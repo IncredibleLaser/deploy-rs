@@ -9,7 +9,7 @@ use std::path::Path;
 use thiserror::Error;
 use tokio::{io::AsyncWriteExt, process::Command};
 
-use crate::{DeployDataDefsError, DeployDefs, ProfileInfo};
+use crate::{command, DeployDataDefsError, DeployDefs, ProfileInfo};
 
 struct ActivateCommandData<'a> {
     sudo: &'a Option<String>,
@@ -144,7 +144,10 @@ fn build_wait_command(data: &WaitCommandData) -> String {
         data.temp_path.display(),
     );
     if let Some(activation_timeout) = data.activation_timeout {
-        self_activate_command = format!("{} --activation-timeout {}", self_activate_command, activation_timeout);
+        self_activate_command = format!(
+            "{} --activation-timeout {}",
+            self_activate_command, activation_timeout
+        );
     }
 
     if let Some(sudo_cmd) = &data.sudo {
@@ -242,31 +245,43 @@ fn test_revoke_command_builder() {
     );
 }
 
-async fn handle_sudo_stdin(ssh_activate_child: &mut tokio::process::Child, deploy_defs: &DeployDefs) -> Result<(), std::io::Error> {
+async fn handle_sudo_stdin(
+    ssh_activate_child: &mut tokio::process::Child,
+    deploy_defs: &DeployDefs,
+) -> Result<(), std::io::Error> {
     match ssh_activate_child.stdin.as_mut() {
         Some(stdin) => {
-            let _ = stdin.write_all(format!("{}\n",deploy_defs.sudo_password.clone().unwrap_or("".to_string())).as_bytes()).await;
+            let _ = stdin
+                .write_all(
+                    format!(
+                        "{}\n",
+                        deploy_defs.sudo_password.clone().unwrap_or("".to_string())
+                    )
+                    .as_bytes(),
+                )
+                .await;
             Ok(())
         }
-        None => {
-            Err(
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Failed to open stdin for sudo command",
-                )
-            )
-        }
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Failed to open stdin for sudo command",
+        )),
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum SSHConfirmError {}
+
+impl command::HasCommandError for SSHConfirmError {
+    fn title() -> String {
+        "SSH confirmation command (the server should roll back)".to_string()
     }
 }
 
 #[derive(Error, Debug)]
 pub enum ConfirmProfileError {
-    #[error("Failed to run confirmation command over SSH (the server should roll back): {0}")]
-    SSHConfirm(std::io::Error),
-    #[error(
-        "Confirming activation over SSH resulted in a bad exit code (the server should roll back): {0:?}"
-    )]
-    SSHConfirmExit(Option<i32>),
+    #[error("{0}")]
+    SSHConfirm(#[from] command::CommandError<SSHConfirmError>),
 }
 
 pub async fn confirm_profile(
@@ -299,23 +314,34 @@ pub async fn confirm_profile(
     let mut ssh_confirm_child = ssh_confirm_command
         .arg(confirm_command)
         .spawn()
-        .map_err(ConfirmProfileError::SSHConfirm)?;
-    
-    if deploy_data.merged_settings.interactive_sudo.unwrap_or(false) {
+        .map_err(|err| ConfirmProfileError::SSHConfirm(command::CommandError::RunError(err)))?;
+
+    if deploy_data
+        .merged_settings
+        .interactive_sudo
+        .unwrap_or(false)
+    {
         trace!("[confirm] Piping in sudo password");
         handle_sudo_stdin(&mut ssh_confirm_child, deploy_defs)
             .await
-            .map_err(ConfirmProfileError::SSHConfirm)?;
+            .map_err(|err| ConfirmProfileError::SSHConfirm(command::CommandError::RunError(err)))?;
     }
 
-    let ssh_confirm_exit_status = ssh_confirm_child
-        .wait()
+    let ssh_confirm_exit_output = ssh_confirm_child
+        .wait_with_output()
         .await
-        .map_err(ConfirmProfileError::SSHConfirm)?; 
+        .map_err(|err| ConfirmProfileError::SSHConfirm(command::CommandError::RunError(err)))?;
 
-    match ssh_confirm_exit_status.code() {
+    match ssh_confirm_exit_output.status.code() {
         Some(0) => (),
-        a => return Err(ConfirmProfileError::SSHConfirmExit(a)),
+        _exit_code => {
+            return Err(ConfirmProfileError::SSHConfirm(
+                command::CommandError::Exit(
+                    ssh_confirm_exit_output,
+                    format!("{:?}", ssh_confirm_command),
+                ),
+            ))
+        }
     };
 
     info!("Deployment confirmed.");
@@ -324,24 +350,37 @@ pub async fn confirm_profile(
 }
 
 #[derive(Error, Debug)]
-pub enum DeployProfileError {
+pub enum SSHActivateError {
     #[error("Failed to spawn activation command over SSH: {0}")]
-    SSHSpawnActivate(std::io::Error),
-
-    #[error("Failed to run activation command over SSH: {0}")]
-    SSHActivate(std::io::Error),
-    #[error("Activating over SSH resulted in a bad exit code: {0:?}")]
-    SSHActivateExit(Option<i32>),
-    #[error("Activating over SSH resulted in a bad exit code: {0:?}")]
-    SSHActivateTimeout(tokio::sync::oneshot::error::RecvError),
-
-    #[error("Failed to run wait command over SSH: {0}")]
-    SSHWait(std::io::Error),
-    #[error("Waiting over SSH resulted in a bad exit code: {0:?}")]
-    SSHWaitExit(Option<i32>),
-
+    OtherError(std::io::Error),
     #[error("Failed to pipe to child stdin: {0}")]
-    SSHActivatePipe(std::io::Error),
+    PipeError(std::io::Error),
+    #[error("Activating over SSH resulted in a bad exit code: {0:?}")]
+    Timeout(tokio::sync::oneshot::error::RecvError),
+}
+
+impl command::HasCommandError for SSHActivateError {
+    fn title() -> String {
+        "SSH activation command".to_string()
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum SSHWaitError {}
+
+impl command::HasCommandError for SSHWaitError {
+    fn title() -> String {
+        "SSH wait command".to_string()
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum DeployProfileError {
+    #[error("{0}")]
+    SSHActivate(#[from] command::CommandError<SSHActivateError>),
+
+    #[error("{0}")]
+    SSHWait(#[from] command::CommandError<SSHWaitError>),
 
     #[error("Error confirming deployment: {0}")]
     Confirm(#[from] ConfirmProfileError),
@@ -411,23 +450,42 @@ pub async fn deploy_profile(
         let mut ssh_activate_child = ssh_activate_command
             .arg(self_activate_command)
             .spawn()
-            .map_err(DeployProfileError::SSHSpawnActivate)?;
+            .map_err(|err| {
+                DeployProfileError::SSHActivate(command::CommandError::OtherError(
+                    SSHActivateError::OtherError(err),
+                ))
+            })?;
 
-        if deploy_data.merged_settings.interactive_sudo.unwrap_or(false) {
+        if deploy_data
+            .merged_settings
+            .interactive_sudo
+            .unwrap_or(false)
+        {
             trace!("[activate] Piping in sudo password");
             handle_sudo_stdin(&mut ssh_activate_child, deploy_defs)
                 .await
-                .map_err(DeployProfileError::SSHActivatePipe)?;
+                .map_err(|err| {
+                    DeployProfileError::SSHActivate(command::CommandError::OtherError(
+                        SSHActivateError::PipeError(err),
+                    ))
+                })?;
         }
 
         let ssh_activate_exit_status = ssh_activate_child
-            .wait()
+            .wait_with_output()
             .await
-            .map_err(DeployProfileError::SSHActivate)?;
+            .map_err(|err| DeployProfileError::SSHActivate(command::CommandError::RunError(err)))?;
 
-        match ssh_activate_exit_status.code() {
+        match ssh_activate_exit_status.status.code() {
             Some(0) => (),
-            a => return Err(DeployProfileError::SSHActivateExit(a)),
+            _exit_code => {
+                return Err(DeployProfileError::SSHActivate(
+                    command::CommandError::Exit(
+                        ssh_activate_exit_status,
+                        format!("{:?}", ssh_activate_command),
+                    ),
+                ))
+            }
         };
 
         if dry_activate {
@@ -452,13 +510,25 @@ pub async fn deploy_profile(
         let mut ssh_activate_child = ssh_activate_command
             .arg(self_activate_command)
             .spawn()
-            .map_err(DeployProfileError::SSHSpawnActivate)?;
+            .map_err(|err| {
+                DeployProfileError::SSHActivate(command::CommandError::OtherError(
+                    SSHActivateError::OtherError(err),
+                ))
+            })?;
 
-        if deploy_data.merged_settings.interactive_sudo.unwrap_or(false) {
+        if deploy_data
+            .merged_settings
+            .interactive_sudo
+            .unwrap_or(false)
+        {
             trace!("[activate] Piping in sudo password");
             handle_sudo_stdin(&mut ssh_activate_child, deploy_defs)
                 .await
-                .map_err(DeployProfileError::SSHActivatePipe)?;
+                .map_err(|err| {
+                    DeployProfileError::SSHActivate(command::CommandError::OtherError(
+                        SSHActivateError::PipeError(err),
+                    ))
+                })?;
         }
 
         info!("Creating activation waiter");
@@ -467,7 +537,7 @@ pub async fn deploy_profile(
         ssh_wait_command
             .arg(&ssh_addr)
             .stdin(std::process::Stdio::piped());
-        
+
         for ssh_opt in &deploy_data.merged_settings.ssh_opts {
             ssh_wait_command.arg(ssh_opt);
         }
@@ -479,10 +549,17 @@ pub async fn deploy_profile(
             let o = ssh_activate_child.wait_with_output().await;
 
             let maybe_err = match o {
-                Err(x) => Some(DeployProfileError::SSHActivate(x)),
+                Err(x) => Some(DeployProfileError::SSHActivate(
+                    command::CommandError::RunError(x),
+                )),
                 Ok(ref x) => match x.status.code() {
                     Some(0) => None,
-                    a => Some(DeployProfileError::SSHActivateExit(a)),
+                    _exit_code => Some(DeployProfileError::SSHActivate(
+                        command::CommandError::Exit(
+                            x.clone(),
+                            format!("{:?}", ssh_activate_command),
+                        ),
+                    )),
                 },
             };
 
@@ -496,21 +573,32 @@ pub async fn deploy_profile(
         let mut ssh_wait_child = ssh_wait_command
             .arg(self_wait_command)
             .spawn()
-            .map_err(DeployProfileError::SSHWait)?;
+            .map_err(|err| DeployProfileError::SSHWait(command::CommandError::RunError(err)))?;
 
-        if deploy_data.merged_settings.interactive_sudo.unwrap_or(false) {
+        if deploy_data
+            .merged_settings
+            .interactive_sudo
+            .unwrap_or(false)
+        {
             trace!("[wait] Piping in sudo password");
             handle_sudo_stdin(&mut ssh_wait_child, deploy_defs)
                 .await
-                .map_err(DeployProfileError::SSHActivatePipe)?;
+                .map_err(|err| {
+                    DeployProfileError::SSHActivate(command::CommandError::OtherError(
+                        SSHActivateError::PipeError(err),
+                    ))
+                })?;
         }
 
         tokio::select! {
-            x = ssh_wait_child.wait() => {
+            x = ssh_wait_child.wait_with_output() => {
                 debug!("Wait command ended");
-                match x.map_err(DeployProfileError::SSHWait)?.code() {
+                let output = x.map_err(|err| DeployProfileError::SSHWait(command::CommandError::RunError(err)))?;
+                match output.status.code() {
                     Some(0) => (),
-                    a => return Err(DeployProfileError::SSHWaitExit(a)),
+                    _exit_code => return Err(DeployProfileError::SSHWait(
+                        command::CommandError::Exit(output, format!("{:?}", ssh_wait_command))
+                    )),
                 };
             },
             x = recv_activate => {
@@ -522,26 +610,37 @@ pub async fn deploy_profile(
         info!("Success activating, attempting to confirm activation");
 
         let c = confirm_profile(deploy_data, deploy_defs, temp_path, &ssh_addr).await;
-        recv_activated.await.map_err(|x| DeployProfileError::SSHActivateTimeout(x))?;
+        recv_activated.await.map_err(|x| {
+            DeployProfileError::SSHActivate(command::CommandError::OtherError(
+                SSHActivateError::Timeout(x),
+            ))
+        })?;
         c?;
 
-        thread
-            .await
-            .map_err(|x| DeployProfileError::SSHActivate(x.into()))?;
+        thread.await.map_err(|x| {
+            DeployProfileError::SSHActivate(command::CommandError::RunError(x.into()))
+        })?;
     }
 
     Ok(())
 }
 
 #[derive(Error, Debug)]
-pub enum RevokeProfileError {
+pub enum SSHRevokeError {
     #[error("Failed to spawn revocation command over SSH: {0}")]
-    SSHSpawnRevoke(std::io::Error),
+    SpawnRevokeError(std::io::Error),
+}
 
-    #[error("Error revoking deployment: {0}")]
-    SSHRevoke(std::io::Error),
-    #[error("Revoking over SSH resulted in a bad exit code: {0:?}")]
-    SSHRevokeExit(Option<i32>),
+impl command::HasCommandError for SSHRevokeError {
+    fn title() -> String {
+        "SSH revoke command".to_string()
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum RevokeProfileError {
+    #[error("{0}")]
+    SSHRevoke(#[from] command::CommandError<SSHRevokeError>),
 
     #[error("Deployment data invalid: {0}")]
     InvalidDeployDataDefs(#[from] DeployDataDefsError),
@@ -579,22 +678,35 @@ pub async fn revoke(
     let mut ssh_revoke_child = ssh_activate_command
         .arg(self_revoke_command)
         .spawn()
-        .map_err(RevokeProfileError::SSHSpawnRevoke)?;
+        .map_err(|err| {
+            RevokeProfileError::SSHRevoke(command::CommandError::OtherError(
+                SSHRevokeError::SpawnRevokeError(err),
+            ))
+        })?;
 
-    if deploy_data.merged_settings.interactive_sudo.unwrap_or(false) {
+    if deploy_data
+        .merged_settings
+        .interactive_sudo
+        .unwrap_or(false)
+    {
         trace!("[revoke] Piping in sudo password");
         handle_sudo_stdin(&mut ssh_revoke_child, deploy_defs)
             .await
-            .map_err(RevokeProfileError::SSHRevoke)?;
+            .map_err(|err| RevokeProfileError::SSHRevoke(command::CommandError::RunError(err)))?;
     }
 
     let result = ssh_revoke_child.wait_with_output().await;
 
     match result {
-        Err(x) => Err(RevokeProfileError::SSHRevoke(x)),
+        Err(x) => Err(RevokeProfileError::SSHRevoke(
+            command::CommandError::RunError(x),
+        )),
         Ok(ref x) => match x.status.code() {
             Some(0) => Ok(()),
-            a => Err(RevokeProfileError::SSHRevokeExit(a)),
+            _exit_code => Err(RevokeProfileError::SSHRevoke(command::CommandError::Exit(
+                x.clone(),
+                format!("{:?}", ssh_activate_command),
+            ))),
         },
     }
 }
