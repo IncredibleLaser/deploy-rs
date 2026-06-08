@@ -30,7 +30,7 @@ impl<T: fmt::Debug + fmt::Display + HasCommandError> fmt::Display for CommandErr
                     "{} command resulted in a bad exit code: {:?}. The failed command is provided below:\n{}\nThe stderr output is provided below:\n{}",
                     T::title(),
                     output.status.code(),
-                    cmd,
+                    unescape::unescape(cmd).unwrap_or(cmd.clone()),
                     stderr,
                 )
             }
@@ -46,8 +46,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn new(command: TokioCommand) -> Command {
-        Command { command }
+    pub fn new(command: TokioCommand) -> Self {
+        Self { command }
     }
 
     pub async fn run<T: fmt::Debug + fmt::Display + HasCommandError>(
