@@ -137,7 +137,7 @@ pub async fn build_profile_locally(
         .stdout(Stdio::null());
 
     command::Command::new(build_command)
-        .run()
+        .status()
         .await
         .map_err(PushProfileError::Build)?;
 
@@ -179,7 +179,7 @@ pub async fn build_profile_locally(
             .arg(local_key)
             .arg(&data.deploy_data.profile.profile_settings.path);
         command::Command::new(sign_command)
-            .run()
+            .status()
             .await
             .map_err(PushProfileError::Sign)?;
     }
@@ -210,7 +210,7 @@ pub async fn build_profile_remotely(
         .arg("--experimental-features")
         .arg("nix-command")
         .arg("copy")
-        .arg("-s") // fetch dependencies from substitures, not localhost
+        .arg("-s") // fetch dependencies from substitutes, not localhost
         .arg("--to")
         .arg(&store_address)
         .arg("--derivation")
@@ -218,7 +218,7 @@ pub async fn build_profile_remotely(
         .env("NIX_SSHOPTS", ssh_opts_str.clone())
         .stdout(Stdio::null());
     command::Command::new(copy_command)
-        .run()
+        .status()
         .await
         .map_err(PushProfileError::Copy)?;
 
@@ -240,7 +240,7 @@ pub async fn build_profile_remotely(
     debug!("build command: {:?}", build_command);
 
     command::Command::new(build_command)
-        .run()
+        .status()
         .await
         .map_err(PushProfileError::Build)?;
 
@@ -419,7 +419,7 @@ pub async fn push_profile(data: PushProfileData<'_>) -> Result<(), PushProfileEr
             .arg(&data.deploy_data.profile.profile_settings.path)
             .env("NIX_SSHOPTS", ssh_opts_str);
         command::Command::new(copy_command)
-            .run()
+            .status()
             .await
             .map_err(PushProfileError::Copy)?;
     }

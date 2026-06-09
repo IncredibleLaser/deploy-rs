@@ -327,17 +327,17 @@ pub async fn confirm_profile(
             .map_err(|err| ConfirmProfileError::SSHConfirm(command::CommandError::RunError(err)))?;
     }
 
-    let ssh_confirm_exit_output = ssh_confirm_child
-        .wait_with_output()
+    let ssh_confirm_exit_status = ssh_confirm_child
+        .wait()
         .await
         .map_err(|err| ConfirmProfileError::SSHConfirm(command::CommandError::RunError(err)))?;
 
-    match ssh_confirm_exit_output.status.code() {
+    match ssh_confirm_exit_status.code() {
         Some(0) => (),
         _exit_code => {
             return Err(ConfirmProfileError::SSHConfirm(
-                command::CommandError::Exit(
-                    ssh_confirm_exit_output,
+                command::CommandError::ExitStatus(
+                    ssh_confirm_exit_status,
                     format!("{:?}", ssh_confirm_command),
                 ),
             ))
@@ -472,15 +472,15 @@ pub async fn deploy_profile(
         }
 
         let ssh_activate_exit_status = ssh_activate_child
-            .wait_with_output()
+            .wait()
             .await
             .map_err(|err| DeployProfileError::SSHActivate(command::CommandError::RunError(err)))?;
 
-        match ssh_activate_exit_status.status.code() {
+        match ssh_activate_exit_status.code() {
             Some(0) => (),
             _exit_code => {
                 return Err(DeployProfileError::SSHActivate(
-                    command::CommandError::Exit(
+                    command::CommandError::ExitStatus(
                         ssh_activate_exit_status,
                         format!("{:?}", ssh_activate_command),
                     ),
@@ -591,13 +591,13 @@ pub async fn deploy_profile(
         }
 
         tokio::select! {
-            x = ssh_wait_child.wait_with_output() => {
+            x = ssh_wait_child.wait() => {
                 debug!("Wait command ended");
-                let output = x.map_err(|err| DeployProfileError::SSHWait(command::CommandError::RunError(err)))?;
-                match output.status.code() {
+                let status = x.map_err(|err| DeployProfileError::SSHWait(command::CommandError::RunError(err)))?;
+                match status.code() {
                     Some(0) => (),
                     _exit_code => return Err(DeployProfileError::SSHWait(
-                        command::CommandError::Exit(output, format!("{:?}", ssh_wait_command))
+                        command::CommandError::ExitStatus(status, format!("{:?}", ssh_wait_command))
                     )),
                 };
             },

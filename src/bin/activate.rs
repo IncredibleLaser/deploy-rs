@@ -182,7 +182,7 @@ pub async fn deactivate(profile_path: &str) -> Result<(), DeactivateError> {
         .arg(&profile_path)
         .arg("--rollback");
     command::Command::new(nix_env_rollback_command)
-        .run()
+        .status()
         .await
         .map_err(DeactivateError::Rollback)?;
 
@@ -221,7 +221,7 @@ pub async fn deactivate(profile_path: &str) -> Result<(), DeactivateError> {
         .arg("--delete-generations")
         .arg(last_generation_id);
     command::Command::new(nix_env_delete_generation_command)
-        .run()
+        .status()
         .await
         .map_err(DeactivateError::DeleteGen)?;
 
@@ -232,7 +232,7 @@ pub async fn deactivate(profile_path: &str) -> Result<(), DeactivateError> {
         .env("PROFILE", &profile_path)
         .current_dir(&profile_path);
     command::Command::new(re_activate_command)
-        .run()
+        .status()
         .await
         .map_err(DeactivateError::Reactivate)?;
 
@@ -333,7 +333,11 @@ pub enum WaitError {
     #[error("Error waiting for activation: {0}")]
     Waiting(#[from] DangerZoneError),
 }
-pub async fn wait(temp_path: PathBuf, closure: String, activation_timeout: Option<u16>) -> Result<(), WaitError> {
+pub async fn wait(
+    temp_path: PathBuf,
+    closure: String,
+    activation_timeout: Option<u16>,
+) -> Result<(), WaitError> {
     let lock_path = deploy::make_lock_path(&temp_path, &closure);
 
     let (created, done) = mpsc::channel(1);
@@ -431,20 +435,21 @@ pub async fn activate(
             .arg(&profile_path)
             .arg("--set")
             .arg(&closure);
-        let nix_env_set_exit_output = nix_env_set_command
-            .output()
+        let nix_env_set_exit_status = nix_env_set_command
+            .status()
             .await
-            .map_err(|err| {
-                ActivateError::SetProfile(command::CommandError::RunError(err))
-            })?;
-        match nix_env_set_exit_output.status.code() {
+            .map_err(|err| ActivateError::SetProfile(command::CommandError::RunError(err)))?;
+        match nix_env_set_exit_status.code() {
             Some(0) => (),
             _exit_code => {
                 if auto_rollback && !dry_activate {
                     deactivate(&profile_path).await?;
                 }
                 return Err(ActivateError::SetProfile(
-                    command::CommandError::Exit(nix_env_set_exit_output, format!("{:?}", nix_env_set_command))
+                    command::CommandError::ExitStatus(
+                        nix_env_set_exit_status,
+                        format!("{:?}", nix_env_set_command),
+                    ),
                 ));
             }
         };
@@ -464,12 +469,10 @@ pub async fn activate(
         .env("DRY_ACTIVATE", if dry_activate { "1" } else { "0" })
         .env("BOOT", if boot { "1" } else { "0" })
         .current_dir(activation_location);
-    let activate_output = match activate_command
-        .output()
+    let activate_status = match activate_command
+        .status()
         .await
-        .map_err(|err| {
-            ActivateError::RunActivate(command::CommandError::RunError(err))
-        })
+        .map_err(|err| ActivateError::RunActivate(command::CommandError::RunError(err)))
     {
         Ok(x) => x,
         Err(e) => {
@@ -481,14 +484,17 @@ pub async fn activate(
     };
 
     if !dry_activate {
-        match activate_output.status.code() {
+        match activate_status.code() {
             Some(0) => (),
             _exit_code => {
                 if auto_rollback {
                     deactivate(&profile_path).await?;
                 }
                 return Err(ActivateError::RunActivate(
-                    command::CommandError::Exit(activate_output, format!("{:?}", activate_command))
+                    command::CommandError::ExitStatus(
+                        activate_status,
+                        format!("{:?}", activate_command),
+                    ),
                 ));
             }
         };
@@ -609,9 +615,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .map_err(|x| Box::new(x) as Box<dyn std::error::Error>),
 
-        SubCommand::Wait(wait_opts) => wait(wait_opts.temp_path, wait_opts.closure, wait_opts.activation_timeout)
-            .await
-            .map_err(|x| Box::new(x) as Box<dyn std::error::Error>),
+        SubCommand::Wait(wait_opts) => wait(
+            wait_opts.temp_path,
+            wait_opts.closure,
+            wait_opts.activation_timeout,
+        )
+        .await
+        .map_err(|x| Box::new(x) as Box<dyn std::error::Error>),
 
         SubCommand::Revoke(revoke_opts) => revoke(get_profile_path(
             revoke_opts.profile_path,

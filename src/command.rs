@@ -11,6 +11,7 @@ pub trait HasCommandError {
 pub enum CommandError<T: fmt::Debug + fmt::Display + HasCommandError> {
     RunError(std::io::Error),
     Exit(std::process::Output, String),
+    ExitStatus(std::process::ExitStatus, String),
     OtherError(T),
 }
 
@@ -27,11 +28,20 @@ impl<T: fmt::Debug + fmt::Display + HasCommandError> fmt::Display for CommandErr
                 };
                 write!(
                     f,
-                    "{} command resulted in a bad exit code: {:?}. The failed command is provided below:\n{}\nThe stderr output is provided below:\n{}",
+                    "{} command resulted in a bad exit status: {}. The failed command is provided below:\n{}\nThe stderr output is provided below:\n{}",
                     T::title(),
-                    output.status.code(),
+                    output.status,
                     unescape::unescape(cmd).unwrap_or(cmd.clone()),
                     stderr,
+                )
+            }
+            CommandError::ExitStatus(status, cmd) => {
+                write!(
+                    f,
+                    "{} command resulted in a bad exit status: {}. The failed command is provided below:\n{}",
+                    T::title(),
+                    status,
+                    unescape::unescape(cmd).unwrap_or(cmd.clone()),
                 )
             }
             CommandError::OtherError(err) => write!(f, "{}", err),
@@ -61,6 +71,23 @@ impl Command {
         match output.status.code() {
             Some(0) => Ok(output),
             _exit_code => Err(CommandError::Exit(output, format!("{:?}", self.command))),
+        }
+    }
+
+    pub async fn status<T: fmt::Debug + fmt::Display + HasCommandError>(
+        &mut self,
+    ) -> Result<std::process::ExitStatus, CommandError<T>> {
+        let status = self
+            .command
+            .status()
+            .await
+            .map_err(CommandError::RunError)?;
+        match status.code() {
+            Some(0) => Ok(status),
+            _exit_code => Err(CommandError::ExitStatus(
+                status,
+                format!("{:?}", self.command),
+            )),
         }
     }
 }
