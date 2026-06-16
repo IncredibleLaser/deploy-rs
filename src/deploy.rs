@@ -563,10 +563,11 @@ pub async fn deploy_profile(
             };
 
             if let Some(err) = maybe_err {
-                send_activate.send(err).unwrap();
+                // The receiver is gone if the main task already returned; that is fine.
+                let _ = send_activate.send(err);
             }
 
-            send_activated.send(()).unwrap();
+            let _ = send_activated.send(());
         });
 
         let mut ssh_wait_child = ssh_wait_command
@@ -601,8 +602,15 @@ pub async fn deploy_profile(
                 };
             },
             x = recv_activate => {
-                debug!("Activate command exited with an error");
-                return Err(x.unwrap());
+                match x {
+                    Ok(err) => {
+                        debug!("Activate command exited with an error");
+                        return Err(err);
+                    }
+                    // The sender was dropped without sending an error, which means
+                    // activation finished successfully before the wait command returned.
+                    Err(_) => debug!("Activation finished before the wait command returned"),
+                }
             },
         }
 
